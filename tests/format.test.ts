@@ -10,6 +10,7 @@ import {
   formatPartialWindow,
   formatRejectedCount,
   formatSessionAverage,
+  formatSubjectTiming,
 } from "../src/format";
 import { VALLEY_MS } from "../src/timing";
 
@@ -80,5 +81,12 @@ describe("closed-floor formatter", () => {
         baseline: 0.07 / 0.23,
       }),
     ).toBe("Floor 0.07 (23% of baseline), 10/10 blinks");
+  });
+
+  it("formats the personal blink-timing line after calibration", () => {
+    expect(formatSubjectTiming(null)).toBe("");
+    expect(
+      formatSubjectTiming({ medianMs: 180.4, minMs: 90, maxMs: 350, fullClosure: 0.72 }),
+    ).toBe("Typical blink 180 ms (90–350 ms), full ≥ 72%");
   });
 });

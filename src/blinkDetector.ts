@@ -121,6 +121,8 @@ export class BlinkDetector {
   private readonly rejected: RejectedEvent[] = [];
   private lastFrameMs = 0;
   private mustReopen = false;
+  private minBlinkMs = BlinkDetector.MIN_BLINK_MS;
+  private maxBlinkMs = BlinkDetector.MAX_BLINK_MS;
 
   get blinkEvents(): readonly BlinkEvent[] {
     return this.events;
@@ -158,6 +160,23 @@ export class BlinkDetector {
     this.adaptiveR = r;
     if (r == null) this.signalNoisy = false;
     if (this.calibrated) this.applyThresholds();
+  }
+
+  /** Personal duration gate. Null restores the legacy 50–700 ms window. */
+  setDurationWindow(minMs: number | null, maxMs?: number | null): void {
+    if (minMs == null || maxMs == null) {
+      this.minBlinkMs = BlinkDetector.MIN_BLINK_MS;
+      this.maxBlinkMs = BlinkDetector.MAX_BLINK_MS;
+      return;
+    }
+    const lo = Math.max(BlinkDetector.MIN_BLINK_MS, Math.min(minMs, maxMs));
+    const hi = Math.min(BlinkDetector.MAX_BLINK_MS, Math.max(minMs, maxMs));
+    this.minBlinkMs = lo;
+    this.maxBlinkMs = Math.max(lo + 80, hi);
+  }
+
+  get durationWindow(): { minMs: number; maxMs: number } {
+    return { minMs: this.minBlinkMs, maxMs: this.maxBlinkMs };
   }
 
   get timingWindows(): { intervalMs: number; valleyFrames: number; warmupFrames: number } {
@@ -208,6 +227,8 @@ export class BlinkDetector {
     this.intervalMs = FRAME_INTERVAL_30_MS;
     this.history.length = 0;
     this.signalNoisy = false;
+    this.minBlinkMs = BlinkDetector.MIN_BLINK_MS;
+    this.maxBlinkMs = BlinkDetector.MAX_BLINK_MS;
   }
 
   lostFace(): void {
@@ -293,8 +314,8 @@ export class BlinkDetector {
 
   private tryCompleteBlink(nowMs: number): boolean {
     const duration = nowMs - this.closedStartedAt;
-    const minMs = this.strict.enabled ? this.strict.minMs : BlinkDetector.MIN_BLINK_MS;
-    const maxMs = this.strict.enabled ? this.strict.maxMs : BlinkDetector.MAX_BLINK_MS;
+    const minMs = this.strict.enabled ? this.strict.minMs : this.minBlinkMs;
+    const maxMs = this.strict.enabled ? this.strict.maxMs : this.maxBlinkMs;
     const durationReason = durationRejectReason(duration, minMs, maxMs);
     const framesOk = this.strict.enabled || this.closedFrames >= BlinkDetector.MIN_CLOSED_FRAMES;
     if (durationReason || !framesOk) {

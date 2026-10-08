@@ -399,9 +399,22 @@ h1 {
 
 .app[data-shell="live"] .empty-state,
 .app[data-shell="calibrating"] .empty-state,
+.app[data-shell="starting"] .empty-state,
 .app[data-shell="live"] .starting-state,
-.app[data-shell="calibrating"] .starting-state {
-  display: none;
+.app[data-shell="calibrating"] .starting-state,
+.app.is-live .empty-state,
+.app.is-live #idle-start-btn {
+  display: none !important;
+}
+
+.app.is-acquiring .stack-heroes > .hero-card,
+.app.is-acquiring .compact-row > .compact-card:first-child,
+.app.is-acquiring #panel-log {
+  opacity: 0.38;
+}
+
+.app.is-acquiring .stack-heroes > .hero-card {
+  pointer-events: none;
 }
 
 .app[data-shell="live"] #scrim:not(.hidden),

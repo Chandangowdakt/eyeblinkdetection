@@ -36,6 +36,16 @@ export function formatClosedFloor(input: {
   return `Floor ${floor.toFixed(2)} (${Math.round(input.r * 100)}% of baseline), ${input.count}/${input.target} blinks`;
 }
 
+export function formatSubjectTiming(profile: {
+  medianMs: number;
+  minMs: number;
+  maxMs: number;
+  fullClosure: number;
+} | null): string {
+  if (!profile) return "";
+  return `Typical blink ${Math.round(profile.medianMs)} ms (${profile.minMs}–${profile.maxMs} ms), full ≥ ${Math.round(profile.fullClosure * 100)}%`;
+}
+
 export function formatHeroRateValue(value: number | null): string {
   if (value == null || Number.isNaN(value)) return "—";
   return value.toFixed(1);

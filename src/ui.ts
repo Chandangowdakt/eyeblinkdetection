@@ -174,6 +174,11 @@ export function setShellState(state: ShellState): void {
   if (app instanceof HTMLElement) app.dataset.shell = state;
 }
 
+export function setAcquiring(on: boolean): void {
+  const app = document.querySelector(".app");
+  if (app instanceof HTMLElement) app.classList.toggle("is-acquiring", on);
+}
+
 export function setCalibrationProgress(count: number, target: number, complete: boolean, visible = false): void {
   const overlay = document.getElementById("cal-overlay");
   const fill = document.getElementById("cal-progress");

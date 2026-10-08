@@ -17,6 +17,7 @@ import { FrameRecorder } from "./recorder";
 import { OPEN_FRAC_LEGACY } from "./adaptive";
 import { AdaptiveCalibration, ClosedFloorCalibration } from "./calibration";
 import { SessionMetrics } from "./metrics";
+import { SubjectCalibration } from "./subjectProfile";
 import { PartialCandidateTracker } from "./partialCandidates";
 import {
   LEGACY_MAX_BLINK_MS,
@@ -33,6 +34,7 @@ import {
   formatPartialSession,
   formatPartialWindow,
   formatSessionAverage,
+  formatSubjectTiming,
 } from "./format";
 import { VALLEY_MS } from "./timing";
 import { PERF_ENABLED, maybeLogPerf, noteProcessedTick, noteRvfcTick, resetPerf, timed } from "./perf";
@@ -56,6 +58,7 @@ import {
   prependBlinkLogRow,
   pulseBlinkFeedback,
   renderRejectedReasonChips,
+  setAcquiring,
   setCalibrationProgress,
   setLowFpsWarning,
   setNearBoundary,
@@ -239,36 +242,95 @@ function persistSettings(): void {
 }
 
 function syncAdaptiveDetector(): void {
-  if (settings.adaptiveThreshold && adaptiveCal.complete) {
-    detector.setAdaptiveClosedRatio(adaptiveCal.r);
-  } else {
-    detector.setAdaptiveClosedRatio(null);
+  if (settings.adaptiveThreshold) {
+    detector.setAdaptiveClosedRatio(adaptiveCal.complete ? adaptiveCal.r : null);
+    return;
   }
+  detector.setAdaptiveClosedRatio(closedFloor.complete ? (subjectCal.profile?.r ?? closedFloor.r) : null);
+}
+
+function clearScoredResults(): void {
+  sessionMetrics.reset(performance.now());
+  partialTracker.reset();
+  chartMarkers.length = 0;
+  clearBlinkLog();
+  lastBlinkCount = -1;
+  lastRateScale = null;
+  lastPartialScale = null;
+  setText(blinkCountEl, "—");
+  setText(blinkRateEl, "—");
+  setText(rate60El, "—");
+  rateUnitEl.hidden = true;
+  setText(partialPctEl, "—");
+  setText(partialWindowEl, "Collecting full blinks");
+  setText(partialSessionEl, "Scoring starts after calibration");
+  partialPctEl.classList.remove("low-sample");
+}
+
+function applySubjectProfileAndArmScoring(): void {
+  const profile = subjectCal.finish();
+  if (profile) {
+    detector.setDurationWindow(profile.minMs, profile.maxMs);
+    liveFullClosure = profile.fullClosure;
+  } else {
+    detector.setDurationWindow(null);
+    liveFullClosure = settings.fullBlinkClosure;
+  }
+  syncAdaptiveDetector();
+  detector.resetCount();
+  analysisStartedAt = performance.now();
+  sessionMetrics.reset(analysisStartedAt);
+  partialTracker.reset();
+  chartMarkers.length = 0;
+  clearBlinkLog();
+  lastBlinkCount = -1;
+  lastRateScale = null;
+  lastPartialScale = null;
+  setText(blinkCountEl, "0");
+  setText(blinkRateEl, formatSessionAverage(0));
+  setText(rate60El, "—");
+  rateUnitEl.hidden = true;
+  setText(partialPctEl, "—");
+  setText(partialWindowEl, "—");
+  setText(partialSessionEl, "Session —");
+  partialPctEl.classList.remove("low-sample");
+  setText(hint, countingHint());
+  setCoach(false);
+}
+
+function resetAcquisition(): void {
+  subjectCal.reset();
+  closedFloor.reset();
+  adaptiveCal.reset();
+  adaptiveCal.setTarget(settings.calibrationBlinks);
+  detector.setDurationWindow(null);
+  liveFullClosure = settings.fullBlinkClosure;
+  syncAdaptiveDetector();
 }
 
 function updateCalibrationUi(): void {
+  const acquiring = isAcquiring();
+  setAcquiring(acquiring);
   if (settings.adaptiveThreshold) {
-    setText(
-      closedFloorEl,
-      adaptiveCal.inconsistent
-        ? adaptiveCal.label
-        : adaptiveCal.complete
-          ? adaptiveCal.liveLine(detector.baseline, detector.closeThreshold)
-          : adaptiveCal.label,
-    );
+    const timing = formatSubjectTiming(subjectCal.profile);
+    const line = adaptiveCal.inconsistent
+      ? adaptiveCal.label
+      : adaptiveCal.complete
+        ? adaptiveCal.liveLine(detector.baseline, detector.closeThreshold)
+        : adaptiveCal.label;
+    setText(closedFloorEl, timing && adaptiveCal.complete && !adaptiveCal.inconsistent ? `${line}. ${timing}` : line);
     setCalibrationProgress(adaptiveCal.count, adaptiveCal.target, adaptiveCal.complete, running);
     if (running) setShellState(adaptiveCal.complete ? "live" : "calibrating");
   } else {
-    setText(
-      closedFloorEl,
-      formatClosedFloor({
-        complete: closedFloor.complete,
-        count: closedFloor.count,
-        target: closedFloor.target,
-        r: closedFloor.r,
-        baseline: detector.baseline,
-      }),
-    );
+    const floorText = formatClosedFloor({
+      complete: closedFloor.complete,
+      count: closedFloor.count,
+      target: closedFloor.target,
+      r: closedFloor.r,
+      baseline: detector.baseline,
+    });
+    const timing = formatSubjectTiming(subjectCal.profile);
+    setText(closedFloorEl, timing && closedFloor.complete ? `${floorText}. ${timing}` : floorText);
     setCalibrationProgress(closedFloor.count, closedFloor.target, closedFloor.complete, running);
     if (running) setShellState(closedFloor.complete ? "live" : "calibrating");
   }
@@ -281,6 +343,13 @@ function setPausedTags(paused: boolean): void {
 }
 
 function renderPartialUi(): void {
+  if (isAcquiring()) {
+    setText(partialPctEl, "—");
+    setText(partialWindowEl, "Collecting full blinks");
+    setText(partialSessionEl, "Scoring starts after calibration");
+    partialPctEl.classList.remove("low-sample");
+    return;
+  }
   const window = sessionMetrics.windowPartialCounts();
   const session = sessionMetrics.sessionPartialCounts();
   setText(partialPctEl, formatPartialHeadline(sessionMetrics.partialPercent()));
@@ -317,6 +386,16 @@ function paintScale(
 function updateScaleUi(now: number, force = false): void {
   if (!force && now - lastScaleUiAt < SCALE_MS) return;
   lastScaleUiAt = now;
+  const rateScale = { kind: "rate" as const, bounds: settings.rateBounds };
+  if (isAcquiring()) {
+    lastRateScale = null;
+    lastPartialScale = null;
+    paintScale(rateScaleEl, rateScaleMarker, rateScaleLabel, null, { level: "grey", label: "Calibrating" }, rateScale);
+    paintScale(partialScaleEl, partialScaleMarker, partialScaleLabel, null, { level: "grey", label: "Calibrating" }, PARTIAL_SCALE);
+    setNearBoundary("rate-near", false);
+    setNearBoundary("partial-near", false);
+    return;
+  }
   const rateValue = sessionMetrics.rollingRatePerMin(now);
   const rate = scaleView(
     rateValue,
@@ -325,7 +404,6 @@ function updateScaleUi(now: number, force = false): void {
     lastRateScale,
   );
   lastRateScale = rate.stored;
-  const rateScale = { kind: "rate" as const, bounds: settings.rateBounds };
   paintScale(rateScaleEl, rateScaleMarker, rateScaleLabel, rateValue, rate.view, rateScale);
   setNearBoundary("rate-near", rateValue != null && isNearScaleBoundary(rateValue, rateScale));
 
@@ -340,6 +418,7 @@ const detector = new BlinkDetector();
 const frameRecorder = new FrameRecorder();
 const closedFloor = new ClosedFloorCalibration();
 const adaptiveCal = new AdaptiveCalibration();
+const subjectCal = new SubjectCalibration();
 const sessionMetrics = new SessionMetrics();
 const partialTracker = new PartialCandidateTracker();
 let settings: AppSettings = loadSettings();
@@ -378,6 +457,26 @@ let lastEngineKind: "ok" | "warn" | "" = "";
 let lastEngineText = "";
 let lastFpsKind: "ok" | "warn" | "" = "";
 let lastFpsText = "";
+let liveFullClosure = settings.fullBlinkClosure;
+
+function calibrationComplete(): boolean {
+  return settings.adaptiveThreshold ? adaptiveCal.complete : closedFloor.complete;
+}
+
+function isAcquiring(): boolean {
+  return !calibrationComplete();
+}
+
+function scoredClosedRatio(): number {
+  if (settings.adaptiveThreshold && adaptiveCal.complete) return adaptiveCal.r;
+  return subjectCal.profile?.r ?? closedFloor.r;
+}
+
+function acquisitionPrompt(): string {
+  const count = settings.adaptiveThreshold ? adaptiveCal.count : closedFloor.count;
+  const target = settings.adaptiveThreshold ? adaptiveCal.target : closedFloor.target;
+  return `Blink fully, naturally. ${count} of ${target} recorded. Scoring starts after calibration.`;
+}
 
 function setPill(el: HTMLElement, text: string, kind: "ok" | "warn" | ""): void {
   const isEngine = el === enginePill;
@@ -419,6 +518,14 @@ function setLive(live: boolean): void {
 }
 
 function renderBlinkCount(forceRate = false): void {
+  if (isAcquiring()) {
+    if (lastBlinkCount !== -2) {
+      lastBlinkCount = -2;
+      setText(blinkCountEl, "—");
+      setText(blinkRateEl, "—");
+    }
+    return;
+  }
   if (detector.blinkCount === lastBlinkCount && !forceRate) return;
   lastBlinkCount = detector.blinkCount;
   setText(blinkCountEl, String(detector.blinkCount));
@@ -440,11 +547,17 @@ function renderStats(
   if (!force && now - lastStatsAt < STATS_MS) return;
   lastStatsAt = now;
 
-  const elapsedMin = Math.max((now - analysisStartedAt) / 60000, 1 / 60);
-  setText(blinkRateEl, formatSessionAverage(detector.blinkCount / elapsedMin));
-  const rateValue = sessionMetrics.rollingRatePerMin(now);
-  setText(rate60El, formatHeroRateValue(rateValue));
-  rateUnitEl.hidden = rateValue == null;
+  if (isAcquiring()) {
+    setText(blinkRateEl, "—");
+    setText(rate60El, "—");
+    rateUnitEl.hidden = true;
+  } else {
+    const elapsedMin = Math.max((now - analysisStartedAt) / 60000, 1 / 60);
+    setText(blinkRateEl, formatSessionAverage(detector.blinkCount / elapsedMin));
+    const rateValue = sessionMetrics.rollingRatePerMin(now);
+    setText(rate60El, formatHeroRateValue(rateValue));
+    rateUnitEl.hidden = rateValue == null;
+  }
   renderPartialUi();
   updateScaleUi(now);
   renderRejectedUi();
@@ -593,9 +706,8 @@ function processFrame(now: number): void {
     leftClosed = snapshot.left < snapshot.closeThreshold;
     rightClosed = snapshot.right < snapshot.closeThreshold;
     if (snapshot.justBlinked) {
-      renderBlinkCount(true);
-      pulseBlinkFeedback();
       if (snapshot.event) {
+        const wasComplete = calibrationComplete();
         closedFloor.record(snapshot.event);
         if (settings.adaptiveThreshold) {
           const result = adaptiveCal.consider(
@@ -603,27 +715,45 @@ function processFrame(now: number): void {
             detector.earHistory,
             snapshot.event.baseline * OPEN_FRAC_LEGACY,
           );
+          if (result.accepted && !wasComplete) subjectCal.record(snapshot.event);
           if (!result.accepted && result.ratio != null) setText(hint, result.message);
-          syncAdaptiveDetector();
+        } else if (!wasComplete) {
+          subjectCal.record(snapshot.event);
         }
-        const logged = sessionMetrics.add(snapshot.event, closedFloor.r, settings.fullBlinkClosure, {
-          history: detector.earHistory,
-          closeLine: snapshot.closeThreshold,
-          uncalibrated: settings.adaptiveThreshold ? !adaptiveCal.complete : !closedFloor.complete,
-          r: settings.adaptiveThreshold && adaptiveCal.complete ? adaptiveCal.r : closedFloor.r,
-          baselineOnset: snapshot.event.baseline,
-        });
-        chartMarkers.push({ kind: logged.class === "partial" ? "partial" : "full", born: overlayFrames });
-        prependBlinkLogRow(
-          sessionMetrics.events.length,
-          logged.class,
-          logged.durationMs,
-          logged.closure,
-          logged.depth,
-        );
+        const nowComplete = calibrationComplete();
+        if (!wasComplete && nowComplete) {
+          applySubjectProfileAndArmScoring();
+          updateCalibrationUi();
+          renderPartialUi();
+          updateScaleUi(now, true);
+        } else if (nowComplete) {
+          renderBlinkCount(true);
+          pulseBlinkFeedback();
+          const logged = sessionMetrics.add(snapshot.event, scoredClosedRatio(), liveFullClosure, {
+            history: detector.earHistory,
+            closeLine: snapshot.closeThreshold,
+            uncalibrated: false,
+            r: scoredClosedRatio(),
+            baselineOnset: snapshot.event.baseline,
+          });
+          chartMarkers.push({ kind: logged.class === "partial" ? "partial" : "full", born: overlayFrames });
+          prependBlinkLogRow(
+            sessionMetrics.events.length,
+            logged.class,
+            logged.durationMs,
+            logged.closure,
+            logged.depth,
+          );
+          updateCalibrationUi();
+          renderPartialUi();
+        } else {
+          updateCalibrationUi();
+          setText(hint, acquisitionPrompt());
+          setCoach(true, acquisitionPrompt());
+        }
+      } else {
+        updateCalibrationUi();
       }
-      updateCalibrationUi();
-      renderPartialUi();
     }
     frameRecorder.push({
       t: now,
@@ -635,7 +765,7 @@ function processFrame(now: number): void {
     });
     if (snapshot.calibrated && !lastHintCalibrated) {
       lastHintCalibrated = true;
-      setText(hint, countingHint());
+      setText(hint, isAcquiring() ? acquisitionPrompt() : countingHint());
     }
   } else {
     sessionMetrics.noteFrame(now, false, false);
@@ -660,10 +790,10 @@ function processFrame(now: number): void {
   timed("draw", () =>
     drawEarChart(earChart, leftEar, rightEar, detector.closeThreshold, detector.avg, {
       markers: chartMarkers.map((marker) => ({ kind: marker.kind, age: overlayFrames - marker.born })),
-      calibrating: !closedFloor.complete,
+      calibrating: isAcquiring(),
       showOpenness: settings.showOpenness,
       baseline: detector.baseline,
-      closedRatio: closedFloor.r,
+      closedRatio: scoredClosedRatio(),
       recovery: settings.recoveryLine ? detector.baseline * 0.85 : null,
       partialLine: settings.partialCandidates ? detector.baseline * 0.82 : null,
     }),
@@ -714,6 +844,9 @@ function processFrame(now: number): void {
     } else if (tilted) {
       setScrim(false);
       setCoach(true, "Face the camera. Counting needs a frontal view of both eyes.");
+    } else if (isAcquiring()) {
+      setCoach(true, acquisitionPrompt());
+      setScrim(false);
     } else {
       setCoach(false);
       setScrim(false);
@@ -738,24 +871,12 @@ async function startAnalysis(): Promise<void> {
     applyStartLineToDetector();
     syncStrictDetector();
     frameRecorder.reset();
-    closedFloor.reset();
-    adaptiveCal.reset();
-    adaptiveCal.setTarget(settings.calibrationBlinks);
-    syncAdaptiveDetector();
-    sessionMetrics.reset(performance.now());
-    partialTracker.reset();
-    chartMarkers.length = 0;
+    resetAcquisition();
     overlayFrames = 0;
     lockedBaseline = 0;
-    clearBlinkLog();
     renderRejectedUi();
+    clearScoredResults();
     updateCalibrationUi();
-    setText(partialPctEl, "—");
-    setText(partialWindowEl, "—");
-    setText(partialSessionEl, "Session —");
-    partialPctEl.classList.remove("low-sample");
-    setText(rate60El, "—");
-    rateUnitEl.hidden = true;
     setPausedTags(false);
     resetEarChart();
     lastBlinkCount = -1;
@@ -786,8 +907,6 @@ async function startAnalysis(): Promise<void> {
     updateCalibrationUi();
     setPill(enginePill, modelDelegate ?? "GPU", "ok");
     setText(hint, "Look straight ahead with eyes open for ~1s so the open-eye baseline can lock.");
-    setText(blinkCountEl, "0");
-    setText(blinkRateEl, formatSessionAverage(0));
     lowFpsState = EMPTY_LOW_FPS;
     setLowFpsWarning(false, 0);
     resetPerf();
@@ -888,12 +1007,15 @@ optRateGreenMax.addEventListener("change", persistSettings);
 optRateAbove.addEventListener("change", persistSettings);
 optRateHigh.addEventListener("change", persistSettings);
 recalibrateBtn.addEventListener("click", () => {
-  adaptiveCal.reset();
-  adaptiveCal.setTarget(settings.calibrationBlinks);
-  closedFloor.reset();
-  syncAdaptiveDetector();
+  resetAcquisition();
+  detector.resetCount();
+  clearScoredResults();
+  renderRejectedUi();
+  analysisStartedAt = performance.now();
+  lastStatsAt = 0;
   updateCalibrationUi();
-  setText(hint, "Recalibrating. Blink fully at a natural pace.");
+  if (running) setShellState("calibrating");
+  setText(hint, "Recalibrating. Blink fully at a natural pace. Scoring waits until calibration finishes.");
 });
 resetSettingsBtn.addEventListener("click", () => {
   settings = { ...DEFAULT_SETTINGS, rateBounds: { ...DEFAULT_SETTINGS.rateBounds } };
@@ -920,29 +1042,13 @@ updateScaleUi(performance.now(), true);
 renderRejectedUi();
 resetBtn.addEventListener("click", () => {
   detector.resetCount();
-  closedFloor.reset();
-  adaptiveCal.reset();
-  adaptiveCal.setTarget(settings.calibrationBlinks);
-  syncAdaptiveDetector();
-  sessionMetrics.reset(performance.now());
-  partialTracker.reset();
-  chartMarkers.length = 0;
-  clearBlinkLog();
+  resetAcquisition();
+  clearScoredResults();
   renderRejectedUi();
   analysisStartedAt = performance.now();
-  lastBlinkCount = -1;
   lastStatsAt = 0;
-  setText(blinkCountEl, "0");
-  setText(blinkRateEl, formatSessionAverage(0));
   updateCalibrationUi();
-  setText(partialPctEl, "—");
-  setText(partialWindowEl, "—");
-  setText(partialSessionEl, "Session —");
-  partialPctEl.classList.remove("low-sample");
-  setText(rate60El, "—");
-  rateUnitEl.hidden = true;
-  lastRateScale = null;
-  lastPartialScale = null;
+  if (running) setShellState("calibrating");
   setPausedTags(!running);
   updateScaleUi(performance.now(), true);
 });
