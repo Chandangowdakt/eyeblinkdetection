@@ -1,0 +1,10 @@
+{
+  "fullBlink": 1,
+  "twoFullBlinks": 2,
+  "partialDip": 1,
+  "jitterOnly": 0,
+  "oneEyeOnly": 0,
+  "headTilt": 0,
+  "real": {},
+  "notes": "Frozen Phase 1 snapshot of BlinkDetector with current defaults at 33.3 ms steps. real: recorded frame CSVs in tests/fixtures/real/."
+}

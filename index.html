@@ -1,0 +1,439 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="color-scheme" content="dark" />
+    <meta name="theme-color" content="#070b14" />
+    <title>BlinkSense &mdash; Real-time Blink Detection</title>
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%230b1220'/><circle cx='16' cy='16' r='7' fill='none' stroke='%233ee0c2' stroke-width='2.5'/><circle cx='16' cy='16' r='2.5' fill='%233ee0c2'/></svg>" />
+  </head>
+  <body>
+    <div class="app" data-shell="idle">
+      <header class="topbar">
+        <div class="brand">
+          <span class="brand-mark" aria-hidden="true"></span>
+          <div>
+            <h1>BlinkSense</h1>
+            <p>On-device blink tracking</p>
+          </div>
+        </div>
+        <div class="status-row" aria-label="Engine status">
+          <span class="pill" id="engine-pill">Engine idle</span>
+          <span class="pill" id="fps-pill">0 fps</span>
+          <span class="pill" id="face-state">Waiting</span>
+          <span class="pill" id="eye-state">Idle</span>
+        </div>
+      </header>
+
+      <main class="layout">
+        <div class="col-left">
+          <section class="stage-card">
+            <div class="stage" id="stage">
+              <video id="webcam" playsinline muted autoplay disablepictureinpicture aria-label="Live webcam preview"></video>
+              <canvas id="overlay" aria-hidden="true"></canvas>
+              <div class="hud" id="hud" aria-hidden="true">
+                <span class="hud-chip" id="hud-eye"></span>
+                <span class="hud-chip" id="hud-face"></span>
+                <span class="hud-chip" id="hud-fps"></span>
+              </div>
+              <div class="blink-flash" id="blink-flash" hidden>Blink</div>
+              <div class="cal-overlay" id="cal-overlay" hidden>
+                <span id="cal-overlay-text" aria-live="polite">0/10, blink fully</span>
+                <div class="cal-track" id="cal-track" role="progressbar" aria-label="Calibration progress" aria-valuemin="0" aria-valuemax="10" aria-valuenow="0" aria-valuetext="0 of 10, blink fully">
+                  <i id="cal-progress"></i>
+                </div>
+              </div>
+              <div class="stage-scrim" id="scrim" role="status">
+                <div class="scrim-stack">
+                  <svg class="idle-camera" viewBox="0 0 48 48" width="48" height="48" aria-hidden="true">
+                    <rect x="3" y="12" width="28" height="22" rx="4" fill="none" stroke="currentColor" stroke-width="2"></rect>
+                    <path d="M31 20l12-7v22l-12-7z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"></path>
+                    <circle cx="17" cy="23" r="6" fill="none" stroke="currentColor" stroke-width="2"></circle>
+                  </svg>
+                  <p id="scrim-copy">Camera off. Start analysis to begin tracking.</p>
+                <div class="empty-state" id="empty-state">
+                  <ol class="idle-steps">
+                    <li>Face the camera in good light</li>
+                    <li>Look straight for 1 second</li>
+                    <li>Blink fully, naturally, 10 times</li>
+                  </ol>
+                  <button type="button" class="btn primary" id="idle-start-btn">Start analysis</button>
+                </div>
+                <div class="starting-state" id="starting-state">
+                  <div class="skeleton" aria-hidden="true"></div>
+                  <p>Starting camera...</p>
+                </div>
+                <div class="camera-error" id="camera-error">
+                  <p id="camera-error-title">Could not start the camera</p>
+                  <ol id="camera-error-steps"></ol>
+                  <button type="button" class="btn primary" id="retry-camera-btn">Retry</button>
+                </div>
+                </div>
+              </div>
+              <div class="coach hidden" id="coach" role="status" aria-live="polite">
+                Please sit so both eyes are visible. Counting starts only then.
+              </div>
+            </div>
+            <p class="banner low-fps-banner" id="low-fps-banner" hidden>Low frame rate (16 fps). Fast blinks can be missed, and Partial % may read high. Close other apps and use good front lighting.</p>
+          </section>
+
+          <section class="chart-card" aria-label="Live eye chart">
+            <div class="chart-head">
+              <span class="chart-label">
+                Live chart
+                <button type="button" class="info-btn" aria-label="About EAR" aria-describedby="tip-ear">
+                  <svg viewBox="0 0 20 20" width="24" height="24" aria-hidden="true"><circle cx="10" cy="10" r="7.5" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M10 9v5" stroke="currentColor" stroke-width="1.6" fill="none"/><circle cx="10" cy="6.5" r="1" fill="currentColor"/></svg>
+                </button>
+                <span id="tip-ear" role="tooltip" class="tooltip">A number for how open the eye is, like a window's height compared with its width. Lower means more closed.</span>
+              </span>
+              <div class="segmented" role="group" aria-label="Chart units">
+                <button type="button" id="chart-mode-ear" aria-pressed="true">EAR</button>
+                <button type="button" id="chart-mode-open" aria-pressed="false">Openness %</button>
+              </div>
+              <label class="sr-only"><input type="checkbox" id="openness-toggle" /> Openness %</label>
+            </div>
+            <canvas id="ear-chart" height="120"></canvas>
+            <p class="chart-legend">
+              <span><i class="swatch line left" aria-hidden="true"></i> Left</span>
+              <span><i class="swatch line right" aria-hidden="true"></i> Right</span>
+              <span><i class="swatch mark full" aria-hidden="true"></i> Full</span>
+              <span><i class="swatch mark partial" aria-hidden="true"></i> Partial</span>
+            </p>
+          </section>
+        </div>
+
+        <div class="col-right">
+          <div class="control-bar" id="control-bar">
+            <button type="button" class="btn primary" id="start-btn">Start</button>
+            <button type="button" class="btn ghost" id="stop-btn" disabled>Stop</button>
+            <button type="button" class="btn ghost" id="reset-btn">Reset count</button>
+            <button type="button" class="btn ghost" id="recalibrate-btn">Recalibrate</button>
+            <button type="button" class="btn icon" id="settings-btn" aria-label="Settings" aria-haspopup="dialog" aria-controls="settings-dialog">
+              <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
+                <path fill="currentColor" d="M19.14 12.94a7.5 7.5 0 0 0 .06-.94 7.5 7.5 0 0 0-.06-.94l2.03-1.58a.5.5 0 0 0 .12-.64l-1.92-3.32a.5.5 0 0 0-.6-.22l-2.39.96a7.2 7.2 0 0 0-1.63-.94l-.36-2.54A.5.5 0 0 0 13.9 1h-3.8a.5.5 0 0 0-.49.42l-.36 2.54c-.58.22-1.12.53-1.63.94l-2.39-.96a.5.5 0 0 0-.6.22L2.81 8.48a.5.5 0 0 0 .12.64l2.03 1.58c-.04.31-.06.63-.06.94s.02.63.06.94L2.93 14.16a.5.5 0 0 0-.12.64l1.92 3.32a.5.5 0 0 0 .6.22l2.39-.96c.5.41 1.05.72 1.63.94l.36 2.54a.5.5 0 0 0 .49.42h3.8a.5.5 0 0 0 .49-.42l.36-2.54c.58-.22 1.12-.53 1.63-.94l2.39.96a.5.5 0 0 0 .6-.22l1.92-3.32a.5.5 0 0 0-.12-.64zM12 15.5A3.5 3.5 0 1 1 12 8.5a3.5 3.5 0 0 1 0 7z"/>
+              </svg>
+            </button>
+          </div>
+
+          <p class="banner" id="recalibrate-banner">Posture or lighting changed, recalibrate</p>
+
+          <div class="stack-heroes">
+            <article class="hero-card">
+              <span class="hero-label">
+                Blink rate
+                <small class="paused-tag hidden" id="rate-paused">Paused</small>
+                <button type="button" class="info-btn" aria-label="About blink rate" aria-describedby="tip-rate">
+                  <svg viewBox="0 0 20 20" width="24" height="24" aria-hidden="true"><circle cx="10" cy="10" r="7.5" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M10 9v5" stroke="currentColor" stroke-width="1.6" fill="none"/><circle cx="10" cy="6.5" r="1" fill="currentColor"/></svg>
+                </button>
+                <span id="tip-rate" role="tooltip" class="tooltip">How many times you blink per minute, over the last minute your face was visible.</span>
+              </span>
+              <div class="hero-metric">
+                <strong class="hero-value" id="rate-60">—</strong>
+                <span class="hero-unit" id="rate-unit" hidden>/ min</span>
+              </div>
+              <div class="scale-wrap">
+                <div class="scale-bar" id="rate-scale" data-level="grey" role="meter" aria-label="Blink rate scale" aria-valuemin="0" aria-valuemax="40" aria-valuenow="0" aria-valuetext="No reading">
+                  <span class="seg red"></span>
+                  <span class="seg orange"></span>
+                  <span class="seg blue"></span>
+                  <span class="seg green"></span>
+                  <span class="seg blue"></span>
+                  <span class="seg orange"></span>
+                  <span class="seg red"></span>
+                  <i class="scale-marker" id="rate-scale-marker"></i>
+                </div>
+                <span class="scale-caption" id="rate-scale-label"></span>
+                <small class="near-tag hidden" id="rate-near" hidden>near boundary</small>
+              </div>
+              <p class="hero-caption">last 60 s of face-visible time</p>
+            </article>
+
+            <article class="hero-card">
+              <span class="hero-label">
+                Partial %
+                <small class="paused-tag hidden" id="partial-paused">Paused</small>
+                <small class="paused-tag hidden" id="partial-low-fps" hidden>low fps</small>
+                <button type="button" class="info-btn" aria-label="About partial percent" aria-describedby="tip-partial">
+                  <svg viewBox="0 0 20 20" width="24" height="24" aria-hidden="true"><circle cx="10" cy="10" r="7.5" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M10 9v5" stroke="currentColor" stroke-width="1.6" fill="none"/><circle cx="10" cy="6.5" r="1" fill="currentColor"/></svg>
+                </button>
+                <span id="tip-partial" role="tooltip" class="tooltip">Share of blinks where the eyelid did not close fully. 0% is ideal. Colours are a guide, not a diagnosis.</span>
+              </span>
+              <div class="hero-metric">
+                <strong class="hero-value" id="partial-pct">—</strong>
+              </div>
+              <div class="scale-wrap">
+                <div class="scale-bar" id="partial-scale" data-level="grey" role="meter" aria-label="Partial blink scale" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-valuetext="No reading">
+                  <span class="seg green"></span>
+                  <span class="seg blue"></span>
+                  <span class="seg orange"></span>
+                  <span class="seg red"></span>
+                  <i class="scale-marker" id="partial-scale-marker"></i>
+                </div>
+                <span class="scale-caption" id="partial-scale-label"></span>
+                <small class="near-tag hidden" id="partial-near" hidden>near boundary</small>
+              </div>
+              <p class="metric-detail" id="partial-window">—</p>
+              <p class="metric-session" id="partial-session">Session —</p>
+            </article>
+
+            <div class="compact-row">
+              <article class="compact-card">
+                <span class="hero-label">Blinks detected</span>
+                <strong class="compact-value" id="blink-count" aria-live="polite" aria-atomic="true">—</strong>
+                <span class="hero-caption" id="blink-rate">—</span>
+              </article>
+              <article class="compact-card">
+                <span class="hero-label">
+                  Calibration
+                  <button type="button" class="info-btn" aria-label="About calibration" aria-describedby="tip-cal">
+                    <svg viewBox="0 0 20 20" width="24" height="24" aria-hidden="true"><circle cx="10" cy="10" r="7.5" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M10 9v5" stroke="currentColor" stroke-width="1.6" fill="none"/><circle cx="10" cy="6.5" r="1" fill="currentColor"/></svg>
+                  </button>
+                  <span id="tip-cal" role="tooltip" class="tooltip">Ten full blinks teach the app what 'closed' looks like for your eyes.</span>
+                </span>
+                <strong class="compact-copy" id="closed-floor" aria-live="polite">Calibrating 0/10, blink fully</strong>
+                <span class="chip hidden" id="noisy-chip">Noisy signal</span>
+              </article>
+            </div>
+          </div>
+
+          <section class="tabs-card" aria-label="Session details">
+            <div class="tab-list" role="tablist" aria-label="Log panels">
+              <button type="button" role="tab" id="tab-log" data-tab="log" aria-controls="panel-log" aria-selected="true">Log</button>
+              <button type="button" role="tab" id="tab-rejected" data-tab="rejected" aria-controls="panel-rejected" aria-selected="false" tabindex="-1">Rejected</button>
+              <button type="button" role="tab" id="tab-diagnostics" data-tab="diagnostics" aria-controls="panel-diagnostics" aria-selected="false" tabindex="-1">Diagnostics</button>
+            </div>
+
+            <div class="tab-panel" role="tabpanel" id="panel-log" aria-labelledby="tab-log">
+              <div class="chart-head">
+                <span class="chart-label">Blink log</span>
+                <button type="button" class="btn ghost compact" id="export-blinks-btn">Export CSV</button>
+              </div>
+              <div class="log-wrap">
+                <table class="log-table">
+                  <thead>
+                    <tr>
+                      <th scope="col">#</th>
+                      <th scope="col">Class</th>
+                      <th scope="col">Duration</th>
+                      <th scope="col">Closure</th>
+                      <th scope="col">Drop</th>
+                    </tr>
+                  </thead>
+                  <tbody id="blink-log"></tbody>
+                </table>
+              </div>
+            </div>
+
+            <div class="tab-panel" role="tabpanel" id="panel-rejected" aria-labelledby="tab-rejected" hidden>
+              <div class="rejected-wrap" id="rejected-wrap">
+                <p class="chart-label" id="rejected-count">Rejected events: 0</p>
+                <div class="rejected-reasons" id="rejected-reasons"></div>
+                <ol class="rejected-log" id="rejected-log"></ol>
+              </div>
+            </div>
+
+            <div class="tab-panel" role="tabpanel" id="panel-diagnostics" aria-labelledby="tab-diagnostics" hidden>
+              <div class="diag-grid">
+                <div class="metric">
+                  <span>Left EAR</span>
+                  <strong id="left-ear">—</strong>
+                </div>
+                <div class="metric">
+                  <span>Right EAR</span>
+                  <strong id="right-ear">—</strong>
+                </div>
+                <div class="metric">
+                  <span>Avg · Min · Max</span>
+                  <strong id="ear-stats">—</strong>
+                </div>
+                <div class="metric">
+                  <span>Baseline / Thresh</span>
+                  <strong id="threshold-value">0.30 / 0.21</strong>
+                </div>
+                <div class="metric">
+                  <span>Pose</span>
+                  <strong id="pose-readout">—</strong>
+                </div>
+                <div class="metric" id="partial-candidate-wrap">
+                  <span>Partial candidates</span>
+                  <strong id="partial-candidates">0</strong>
+                </div>
+              </div>
+              <button type="button" class="btn ghost compact" id="export-frames-btn">Download frame CSV</button>
+            </div>
+          </section>
+        </div>
+      </main>
+
+      <footer class="site-footer">
+        <p class="hint" id="hint">Counting uses an eye-closure dip and recovery check (about 0.4 s window), a both-eyes check, and a blink length of 50-700 ms (60-500 ms with strict validation on).</p>
+        <p class="footnote">Processing stays on-device. The live video never leaves this browser.</p>
+        <p class="footnote" id="scale-footnote">Guide colours only, not a medical assessment.</p>
+      </footer>
+    </div>
+
+    <dialog id="settings-dialog" aria-labelledby="settings-title">
+      <div class="dialog-head">
+        <h2 id="settings-title">Settings</h2>
+        <button type="button" class="btn icon" id="settings-close-btn" aria-label="Close settings">
+          <svg viewBox="0 0 20 20" width="18" height="18" aria-hidden="true"><path d="M5 5l10 10M15 5L5 15" stroke="currentColor" stroke-width="1.8" fill="none"/></svg>
+        </button>
+      </div>
+      <form class="settings" id="settings-panel" aria-label="Detection settings">
+        <fieldset>
+          <legend>Detection</legend>
+          <div class="setting">
+            <div class="setting-copy">
+              <label for="opt-cal-blinks">Calibration blinks</label>
+              <p>How many full blinks teach the app your closed-eye look.</p>
+            </div>
+            <select id="opt-cal-blinks">
+              <option value="10" selected>10</option>
+              <option value="5">5</option>
+            </select>
+          </div>
+          <div class="setting">
+            <div class="setting-copy">
+              <label for="opt-full">Full closure %</label>
+              <p>How shut the eyelid must be to count as a full blink.</p>
+            </div>
+            <input type="number" id="opt-full" min="50" max="95" step="1" value="80" />
+          </div>
+          <div class="setting">
+            <div class="setting-copy">
+              <label for="opt-strict-events">Strict validation</label>
+              <p>Extra checks that can drop blinks that look like winks or noise.</p>
+            </div>
+            <input type="checkbox" id="opt-strict-events" />
+          </div>
+          <div class="setting sub">
+            <label for="opt-strict-min">Strict min ms</label>
+            <input type="number" id="opt-strict-min" min="20" max="200" step="5" value="60" />
+          </div>
+          <div class="setting sub">
+            <label for="opt-strict-max">Strict max ms</label>
+            <input type="number" id="opt-strict-max" min="200" max="1000" step="10" value="500" />
+          </div>
+          <div class="setting sub">
+            <label for="opt-wink-dip">Wink dip max n</label>
+            <input type="number" id="opt-wink-dip" min="0.5" max="1" step="0.05" value="0.80" />
+          </div>
+          <div class="setting sub">
+            <label for="opt-wink-asym">Wink |nL−nR| max</label>
+            <input type="number" id="opt-wink-asym" min="0.1" max="1" step="0.05" value="0.35" />
+          </div>
+        </fieldset>
+
+        <fieldset>
+          <legend>Scales</legend>
+          <div class="setting">
+            <div class="setting-copy">
+              <label for="opt-rate-preset">Preset</label>
+              <p>Colour bands for blink rate. Guide only, not a diagnosis.</p>
+            </div>
+            <select id="opt-rate-preset">
+              <option value="resting" selected>Resting</option>
+              <option value="screen">Screen</option>
+            </select>
+          </div>
+          <div class="setting sub">
+            <label for="opt-rate-verylow">Rate red below</label>
+            <input type="number" id="opt-rate-verylow" step="0.5" value="5" />
+          </div>
+          <div class="setting sub">
+            <label for="opt-rate-low">Rate orange below</label>
+            <input type="number" id="opt-rate-low" step="0.5" value="8" />
+          </div>
+          <div class="setting sub">
+            <label for="opt-rate-below">Rate blue below</label>
+            <input type="number" id="opt-rate-below" step="0.5" value="12" />
+          </div>
+          <div class="setting sub">
+            <label for="opt-rate-greenmax">Rate green max</label>
+            <input type="number" id="opt-rate-greenmax" step="0.5" value="20" />
+          </div>
+          <div class="setting sub">
+            <label for="opt-rate-above">Rate blue max</label>
+            <input type="number" id="opt-rate-above" step="0.5" value="25" />
+          </div>
+          <div class="setting sub">
+            <label for="opt-rate-high">Rate orange max</label>
+            <input type="number" id="opt-rate-high" step="0.5" value="30" />
+          </div>
+        </fieldset>
+
+        <fieldset>
+          <legend>Camera</legend>
+          <div class="setting">
+            <div class="setting-copy">
+              <label for="opt-fps">FPS</label>
+              <p>Capture rate. 60 fps is experimental.</p>
+            </div>
+            <select id="opt-fps">
+              <option value="30" selected>30</option>
+              <option value="60">60 (experimental)</option>
+            </select>
+          </div>
+        </fieldset>
+
+        <fieldset>
+          <legend>Advanced</legend>
+          <div class="setting">
+            <div class="setting-copy">
+              <label for="opt-partial">Partial candidates</label>
+              <p>Count near-miss eyelid dips that did not become blinks.</p>
+            </div>
+            <input type="checkbox" id="opt-partial" />
+          </div>
+          <div class="setting">
+            <div class="setting-copy">
+              <label for="opt-recovery">Recovery line</label>
+              <p>Draw a line the eyes must pass on the way back up.</p>
+            </div>
+            <input type="checkbox" id="opt-recovery" />
+          </div>
+          <div class="setting">
+            <div class="setting-copy">
+              <label for="opt-pitch">Pitch gating</label>
+              <p>Ignore frames when you look too far up or down.</p>
+            </div>
+            <input type="checkbox" id="opt-pitch" />
+          </div>
+          <div class="setting">
+            <div class="setting-copy">
+              <label for="opt-custom-start">Custom start line</label>
+              <p>Use your own % of open-eye height to start a blink.</p>
+            </div>
+            <input type="checkbox" id="opt-custom-start" />
+          </div>
+          <div class="setting">
+            <div class="setting-copy">
+              <label for="opt-adaptive">Adaptive threshold</label>
+              <p>Learn a closed-eye line from your blinks instead of a fixed floor.</p>
+            </div>
+            <input type="checkbox" id="opt-adaptive" />
+          </div>
+          <div class="setting">
+            <div class="setting-copy">
+              <label for="opt-start">Start line %</label>
+              <p>How far the eye must drop before a blink can start.</p>
+            </div>
+            <input type="number" id="opt-start" min="60" max="80" step="1" value="70" />
+          </div>
+          <div class="setting">
+            <div class="setting-copy">
+              <label for="opt-pose-limit">Pose limit °</label>
+              <p>Maximum head tilt, in degrees, before tracking pauses.</p>
+            </div>
+            <input type="number" id="opt-pose-limit" min="10" max="45" step="1" value="25" />
+          </div>
+        </fieldset>
+
+        <button type="button" class="btn ghost compact" id="reset-settings-btn">Reset to defaults</button>
+      </form>
+    </dialog>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
